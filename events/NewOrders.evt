@@ -1,0 +1,34 @@
+// TODO: Enter Apama events for sending here (one event per line). 
+// These should be based on event definitions in an EPL (.mon) file. 
+
+// For example, using this event definition (which would be added to a .mon file):
+// event Measurement {
+//    string deviceId;
+//    dictionary<string, any> dict;
+//    optional<float> timestamp;
+// }
+// ... the following events could be used in an event (.evt) file:
+// Measurement("Carrera_1",{"Temperature":any(Temperature,Temperature("Celsius",23))},optional(1495619586.1))
+// Measurement("Carrera_2",{"Speed":any(Speed,Speed("mph",20)),"Temperature":any(Temperature,Temperature("Celsius",23))},optional())
+
+
+//event NewOrder {
+//	string type; // "market" or "limit"
+//	string side; // "SELL" or "BUY"
+//	wildcard string currencyPair;
+//	wildcard integer quantity;
+//	wildcard float price;
+//}
+//
+
+NewOrder ("eh", "SELL", "USD/RUB", 10, 65);
+NewOrder ("limits", "SELL", "USD/RUB", 10000, 65.4);
+NewOrder ("limits", "SELL", "USD/RUB", 3000000, 64.7);
+NewOrder ("limits", "BUY", "USD/RUB", 1000, 65);
+NewOrder ("limits", "BUY", "USD/RUB", 13000, 65.5);
+NewOrder ("limits", "SELL", "USD/RUB", 20000, 65.2);
+
+OrderCancelRequest ("USD/RUB", 2);
+OrderCancelRequest ("USD/RUB", 15);
+
+NewOrder("limits", )

@@ -1,0 +1,203 @@
+
+/** This monitor is responsible for ...  */
+event NewOrder {
+	string type; // "market" or "limit"
+	string side; // "SELL" or "BUY"
+	wildcard string currencyPair;
+	wildcard integer quantity;
+	wildcard float price;
+}
+
+event Order {
+	string type; // "market" or "limit"
+	string side; // "SELL" or "BUY"
+	wildcard string currencyPair;
+	wildcard integer quantity;
+	wildcard float price;
+	wildcard integer orderID;
+}
+
+event ExecutionReport {
+	string executeState; // "NEW", "ACCEPTED", "PARTIALLY_FILLED", "FILLED", "CANCELED", "REJECTED"
+	string orderState;
+	integer orderID;
+	integer quantity;
+	integer executedQuantity;
+	float cumulativeQuantity;
+	float price;
+	float avprice;
+	
+	action updateReport (Order order, integer quantityToTrade) {
+//		if (self.orderID != order.orderID) {
+//			log "WRONG ORDER GIVEN" at DEBUG;
+//			return;
+//		}
+		self.executedQuantity := self.executedQuantity + quantityToTrade;
+		self.cumulativeQuantity := self.cumulativeQuantity + (quantityToTrade.toFloat() * order.price);
+		if (self.executedQuantity > 0) {
+			self.avprice := self.cumulativeQuantity / self.executedQuantity.toFloat();
+		}
+	}
+	action updateReportStatusAndEmit() {
+		if (self.executedQuantity = 0) {
+			return;
+		} else if (self.executedQuantity < self.quantity) {
+			self.executeState := "PARTIALLY_FILLED";
+			self.orderState := "PARTIALLY_FILLED";
+		} else if (self.executedQuantity = self.quantity) {
+			self.executeState := "FILLED";
+			self.orderState := "FILLED";
+		} else {
+			log "INTERNAL ERROR! WRONG CALCULATES" at DEBUG;
+		}
+		emit self to "CLIENT";
+		print "\n" + self.toString() + "\n";
+	}
+}
+
+event OrderCancelRequest {
+	string currencyPair;
+	integer orderID;
+}
+
+monitor TradingMon {
+	dictionary<string, dictionary<string, dictionary<float, sequence<Order> > > > allOrders :=
+		{ "BUY" : new dictionary<string, dictionary<float, sequence<Order> > >, 		
+		  "SELL": new dictionary<string, dictionary<float, sequence<Order> > > };
+	dictionary<integer, ExecutionReport> reports;
+	action onload() {
+		log "Loaded monitor TradingMon" at INFO;
+		print float.MIN.toString() + "     -----    " + float.MAX.toString();
+		on all NewOrder() as newOrder {
+			integer orderID := integer.getUnique();
+			ExecutionReport report;
+			string status;
+			if ((newOrder.type != "market" and newOrder.type != "limits") or
+			    (newOrder.side != "BUY" and newOrder.side != "SELL") or
+				newOrder.price <= 0. or newOrder.quantity <= 0) then {
+				status := "REJECTED";
+			} else {
+				status := "ACCEPTED";
+			}
+			report := ExecutionReport(status, status, orderID, newOrder.quantity, 0, 0., newOrder.price, 0.);
+			emit report to "CLIENT";
+			print "\n" + report.toString() + "\n";
+			
+			if (status = "ACCEPTED") {
+				Order order := new Order;
+				order.currencyPair := newOrder.currencyPair;
+				order.orderID := orderID;
+				order.price := newOrder.price;
+				order.quantity := newOrder.quantity;
+				order.side := newOrder.side;
+				order.type := newOrder.type;
+				string otherSide;
+				if (order.side = "BUY") {
+					otherSide := "SELL";
+					if (order.type = "market") {
+						order.price := float.MAX;
+					}
+				} else {
+					otherSide := "BUY";
+					if (order.type = "market") {
+						order.price := 0.;
+					}
+				}
+				
+				if (allOrders[otherSide].hasKey(order.currencyPair)) {
+					dictionary<float, sequence<Order> > currCurrency := allOrders[otherSide][order.currencyPair];
+					sequence<float> pricesKeys := currCurrency.keys();
+					float price;
+					if (order.side = "SELL") {
+						pricesKeys.reverse();
+					}
+					for price in pricesKeys {
+						if (CheckPriceIncorrectness(price, order.price, order.side)) {
+							break;
+						}
+						sequence<Order> currentOrders := currCurrency[price];
+						while (currentOrders.size() > 0 and order.quantity > 0) {
+							integer quantityToTrade := integer.min (order.quantity, currentOrders[0].quantity);
+							
+							report.updateReport(order, quantityToTrade);
+							reports[currentOrders[0].orderID].updateReport(order, quantityToTrade);
+							reports[currentOrders[0].orderID].updateReportStatusAndEmit();
+							
+							currentOrders[0].quantity := currentOrders[0].quantity - quantityToTrade;
+							order.quantity := order.quantity - quantityToTrade;
+							if (currentOrders[0].quantity = 0) {
+								reports.remove(currentOrders[0].orderID);
+								currentOrders.remove(0);
+							}
+						}
+						if (currentOrders.size() = 0) {
+							currCurrency.remove(price);
+						}
+					}
+					/*
+					if (currCurrency.size() = 0) {
+						allOrders[otherSide].remove(order.currencyPair);
+					}
+					*/
+				}
+				if (order.quantity > 0) {
+					if (not allOrders[order.side].hasKey(order.currencyPair)) {
+						allOrders[order.side].add(order.currencyPair, new dictionary<float, sequence<Order> >);
+					}
+					if (not allOrders[order.side][order.currencyPair].hasKey(order.price)) {
+						allOrders[order.side][order.currencyPair].add(order.price, new sequence<Order>);
+					}
+					allOrders[order.side][order.currencyPair][order.price].append(order);
+					reports.add (order.orderID, report);
+				}
+				report.updateReportStatusAndEmit();
+			}
+		}
+		
+		on all OrderCancelRequest() as orderCancel {
+			ExecutionReport report;
+			if (not reports.hasKey(orderCancel.orderID)) {
+				report := ExecutionReport ("REJECTED", "CANCELLED", -1, 0, 0, 0., 0., 0.);
+			} else {
+				report := reports[orderCancel.orderID];
+				string side;
+				Order order;
+				boolean orderWasFound := false;
+				for side in ["BUY", "SELL"] {
+					if (allOrders[side].hasKey(orderCancel.currencyPair) and allOrders[side][orderCancel.currencyPair].hasKey(report.price)) {
+						integer orderIndex := 0;
+						for order in allOrders[side][orderCancel.currencyPair][report.price] {
+							if (order.orderID = orderCancel.orderID) {
+								orderWasFound := true;
+								allOrders[side][orderCancel.currencyPair][report.price].remove(orderIndex);
+								break;
+							}
+							orderIndex := orderIndex + 1;
+						}
+					}
+					if (orderWasFound) {
+						break;
+					}
+				}
+				if (orderWasFound) {
+					reports.remove(orderCancel.orderID);
+				} else {
+					log "INTERNAL ERROR: no order in list" at DEBUG;
+				}
+				report.executeState := "CANCELLED";
+				report.orderState   := "CANCELLED";
+			}
+			
+			emit report to "CLIENT";
+			print "\n" + report.toString() + "\n";
+		}
+	}
+
+	action CheckPriceIncorrectness(float price1, float price2, string side) returns boolean {
+		if (side = "BUY") {
+			return price1 > price2;
+		} else { // side = "SELL"
+			return price1 < price2;
+		}	
+	}
+}
